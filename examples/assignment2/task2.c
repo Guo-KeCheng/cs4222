@@ -11,110 +11,65 @@ PROCESS(process_rtimer, "RTimer");
 AUTOSTART_PROCESSES(&process_rtimer);
 
 static int curr_lux;
-static int curr_mpu;
+static int curr_mpu_x;
+static int curr_mpu_y;
+static int curr_mpu_z;
 
-// static int counter_rtimer;
+static int state = 0;
+static int counter = 4;
+
 static struct rtimer timer_rtimer;
-static rtimer_clock_t timeout_rtimer = RTIMER_SECOND / 4;  
-int buzzerFrequency[8]={2093,2349,2637,2794,3156,3520,3951,4186}; // hgh notes on a piano
+static rtimer_clock_t state_start_time;
+static rtimer_clock_t SAMPLE_TIME = RTIMER_SECOND / 4;
+static rtimer_clock_t BUZZ_TIME = RTIMER_SECOND * 2;
+static rtimer_clock_t WAIT_TIME = RTIMER_SECOND * 2;
+int buzzerFrequency[8] = {2093, 2349, 2637, 2794, 3156, 3520, 3951, 4186}; // notes on a piano
 
 /*---------------------------------------------------------------------------*/
 static void init_opt_reading(void);
 static int get_light_reading(void);
-// static void print_mpu_reading(int reading);
-// static void get_mpu_reading(void);
 static int check_change_in_lux(void);
+static void init_mpu_reading(void);
 static int check_change_in_mpu(void);
+static void transition_to_idle(void);
+static void transition_to_buzz(void);
+static void transition_to_wait(void);
+void do_rtimer_timeout(struct rtimer *timer, void *ptr);
 /*---------------------------------------------------------------------------*/
 
-
-// static void
-// get_mpu_reading()
-// {
-//   int value;
-
-//   printf("MPU Gyro: X=");
-//   value = mpu_9250_sensor.value(MPU_9250_SENSOR_TYPE_GYRO_X);
-//   print_mpu_reading(value);
-//   printf(" deg/sec\n");
-
-//   printf("MPU Gyro: Y=");
-//   value = mpu_9250_sensor.value(MPU_9250_SENSOR_TYPE_GYRO_Y);
-//   print_mpu_reading(value);
-//   printf(" deg/sec\n");
-
-//   printf("MPU Gyro: Z=");
-//   value = mpu_9250_sensor.value(MPU_9250_SENSOR_TYPE_GYRO_Z);
-//   print_mpu_reading(value);
-//   printf(" deg/sec\n");
-
-//   printf("MPU Acc: X=");
-//   value = mpu_9250_sensor.value(MPU_9250_SENSOR_TYPE_ACC_X);
-//   print_mpu_reading(value);
-//   printf(" G\n");
-
-//   printf("MPU Acc: Y=");
-//   value = mpu_9250_sensor.value(MPU_9250_SENSOR_TYPE_ACC_Y);
-//   print_mpu_reading(value);
-//   printf(" G\n");
-
-//   printf("MPU Acc: Z=");
-//   value = mpu_9250_sensor.value(MPU_9250_SENSOR_TYPE_ACC_Z);
-//   print_mpu_reading(value);
-//   printf(" G\n");
-// }
-
-void
-do_rtimer_timeout(struct rtimer *timer, void *ptr)
+static void
+init_opt_reading(void)
 {
-  /* Re-arm rtimer. Starting up the sensor takes around 125ms */
-  /* rtimer period 2s */
-  // clock_time_t t;
-  // t = clock_time();
-  rtimer_set(&timer_rtimer, RTIMER_NOW() + timeout_rtimer, 0, do_rtimer_timeout, NULL);
+  SENSORS_ACTIVATE(opt_3001_sensor);
+}
 
-  // int s, ms1,ms2,ms3;
-  // s = clock_time() / CLOCK_SECOND;
-  // ms1 = (clock_time()% CLOCK_SECOND)*10/CLOCK_SECOND;
-  // ms2 = ((clock_time()% CLOCK_SECOND)*100/CLOCK_SECOND)%10;
-  // ms3 = ((clock_time()% CLOCK_SECOND)*1000/CLOCK_SECOND)%10;
-  
-  // counter_rtimer++;
-  // printf(": %d (cnt) %ld (ticks) %d.%d%d%d (sec) \n",counter_rtimer,t, s, ms1,ms2,ms3); 
-  // get_light_reading();
-
-  if (check_change_in_mpu() || check_change_in_lux()) {
-      int i = 4;
-      
-      while (i > 0) {
-        buzzer_start(2093);
-        clock_wait(CLOCK_SECOND * 2);
-        buzzer_stop();
-        clock_wait(CLOCK_SECOND * 2);
-
-        i--;
-      }
-    }
+static void
+init_mpu_reading(void)
+{
+  mpu_9250_sensor.configure(SENSORS_ACTIVE, MPU_9250_SENSOR_TYPE_ALL);
 }
 
 static int
 get_light_reading()
 {
   int value;
-  init_opt_reading();
 
   value = opt_3001_sensor.value(0);
-  if(value != CC26XX_SENSOR_READING_ERROR) {
+  if (value != CC26XX_SENSOR_READING_ERROR)
+  {
     printf("OPT: Light=%d.%02d lux\n", value / 100, value % 100);
+    init_opt_reading();
     return value;
-  } else {
+  }
+  else
+  {
     printf("OPT: Light Sensor's Warming Up\n\n");
+    init_opt_reading();
     return -1;
   }
 }
 
-
-static int 
+static int
 check_change_in_lux()
 {
   int new_lux = get_light_reading();
@@ -134,54 +89,157 @@ check_change_in_lux()
   }
 }
 
+// Check if there is a significant change in the MPU reading
+// on all three axes, update the current reading regardless
+// Return 1 if there is a significant change, 0 otherwise
 static int
 check_change_in_mpu()
 {
-  int significant_change = 400;
+  int significant_change = 1000;
 
-  int new_mpu = mpu_9250_sensor.value(MPU_9250_SENSOR_TYPE_GYRO_X);
-  if (abs(new_mpu - curr_mpu) > significant_change) {
-    printf("The mpu has changed from %d to %d\n", curr_mpu, new_mpu);
-    curr_mpu = new_mpu;
+  int new_mpu_x = mpu_9250_sensor.value(MPU_9250_SENSOR_TYPE_GYRO_X);
+  int new_mpu_y = mpu_9250_sensor.value(MPU_9250_SENSOR_TYPE_GYRO_Y);
+  int new_mpu_z = mpu_9250_sensor.value(MPU_9250_SENSOR_TYPE_GYRO_Z);
+
+  if (abs(new_mpu_x - curr_mpu_x) > significant_change) {
+    printf("The mpu_x has changed from %d to %d\n", curr_mpu_x, new_mpu_x);
+    curr_mpu_x = new_mpu_x;
+    init_mpu_reading();
+    return 1;
+  } else if (abs(new_mpu_y - curr_mpu_y) > significant_change) {
+    printf("The mpu_y has changed from %d to %d\n", curr_mpu_y, new_mpu_y);
+    curr_mpu_y = new_mpu_y;
+    init_mpu_reading();
+    return 1;
+  } else if (abs(new_mpu_z - curr_mpu_z) > significant_change) {
+    printf("The mpu_z has changed from %d to %d\n", curr_mpu_z, new_mpu_z);
+    curr_mpu_z = new_mpu_z;
+    init_mpu_reading();
     return 1;
   } else {
-    // printf("The mpu has not changed\n");
-    curr_mpu = new_mpu;
+    curr_mpu_x = new_mpu_x;
+    curr_mpu_y = new_mpu_y;
+    curr_mpu_z = new_mpu_z;
+    init_mpu_reading();
     return 0;
   }
 }
 
-static void
-init_opt_reading(void)
-{
-  SENSORS_ACTIVATE(opt_3001_sensor);
+static void transition_to_idle(void) {
+    printf("Transitioning to idle...\n");
+    state = 0;
+
 }
+
+static void transition_to_buzz(void) {
+    printf("Transitioning to buzz...\n");
+    state = 1;
+
+}
+
+static void transition_to_wait(void) {
+    printf("Transitioning to wait...\n");
+    state = 2;
+
+}
+
+static void update_lux() {
+    printf("Updating lux\n");
+    curr_lux = get_light_reading();
+}
+
+static void update_mpu() {
+    printf("Updating mpu\n");
+    curr_mpu_x = mpu_9250_sensor.value(MPU_9250_SENSOR_TYPE_GYRO_X);
+    curr_mpu_y = mpu_9250_sensor.value(MPU_9250_SENSOR_TYPE_GYRO_Y);
+    curr_mpu_z = mpu_9250_sensor.value(MPU_9250_SENSOR_TYPE_GYRO_Z);
+    init_mpu_reading();
+}
+
+void do_rtimer_timeout(struct rtimer *timer, void *ptr)
+{
+    rtimer_clock_t current_time = RTIMER_NOW();
+    rtimer_clock_t state_duration_ticks;
+    rtimer_clock_t state_duration_seconds;
+
+    switch(state) {
+        // IDLE state
+        case 0:
+            counter = 4;
+
+            if (check_change_in_lux() || check_change_in_mpu()){
+                transition_to_buzz();
+                // update_mpu();
+            }
+            else {
+                rtimer_set(&timer_rtimer, current_time + SAMPLE_TIME, 0, do_rtimer_timeout, NULL);
+            }
+            
+            // Calculate state duration
+            state_duration_ticks = current_time - state_start_time;
+            state_duration_seconds = state_duration_ticks / RTIMER_SECOND;
+            
+            // Print state duration
+            printf("State: IDLE, Duration: %lu ticks (%lu seconds)\n", state_duration_ticks, state_duration_seconds);
+
+            break;
+        
+        // BUZZ state
+        case 1:
+            buzzer_start(buzzerFrequency[counter]);
+            rtimer_set(&timer_rtimer, current_time + BUZZ_TIME, 0, do_rtimer_timeout, NULL);
+            transition_to_wait();
+            
+            // Calculate state duration
+            state_duration_ticks = current_time - state_start_time;
+            state_duration_seconds = state_duration_ticks / RTIMER_SECOND;
+            
+            // Print state duration
+            printf("State: BUZZ, Duration: %lu ticks (%lu seconds)\n", state_duration_ticks, state_duration_seconds);
+            
+            // Update state start time
+            state_start_time = current_time;
+            break;
+
+        // WAIT state
+        case 2:
+            buzzer_stop();
+            if (--counter > 0) {
+                rtimer_set(&timer_rtimer, current_time + WAIT_TIME, 0, do_rtimer_timeout, NULL);
+                transition_to_buzz();
+            } else {
+                rtimer_set(&timer_rtimer, current_time + WAIT_TIME, 0, do_rtimer_timeout, NULL);
+                update_lux();
+                update_mpu();
+                transition_to_idle();
+            }
+            
+            // Calculate state duration
+            state_duration_ticks = current_time - state_start_time;
+            state_duration_seconds = state_duration_ticks / RTIMER_SECOND;
+            
+            // Print state duration
+            printf("State: WAIT, Duration: %lu ticks (%lu seconds)\n", state_duration_ticks, state_duration_seconds);
+
+            // Update state start time
+            state_start_time = current_time;
+            break;
+    }
+
+}
+
 
 PROCESS_THREAD(process_rtimer, ev, data)
 {
   PROCESS_BEGIN();
   init_opt_reading();
+  init_mpu_reading();
+  state_start_time = RTIMER_NOW();
 
-  // printf(" The value of RTIMER_SECOND is %d \n",RTIMER_SECOND);
-  // printf(" The value of timeout_rtimer is %ld \n",timeout_rtimer);
+  while (1)
+  {
 
-  while(1) {
-    
-    // // Buzz for 2 seconds if changes detected
-    // if (check_change_in_lux() || check_change_in_mpu()) {
-    //   int i = 4;
-      
-    //   while (i > 0) {
-    //     buzzer_start(2093);
-    //     clock_wait(CLOCK_SECOND * 2);
-    //     buzzer_stop();
-    //     clock_wait(CLOCK_SECOND * 2);
-
-    //     i--;
-    //   }
-    // }
-
-    rtimer_set(&timer_rtimer, RTIMER_NOW() + timeout_rtimer, 0,  do_rtimer_timeout, NULL);
+    rtimer_set(&timer_rtimer, RTIMER_NOW() + SAMPLE_TIME, 0, do_rtimer_timeout, NULL);
 
     PROCESS_YIELD();
   }
